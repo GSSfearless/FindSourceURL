@@ -1,0 +1,27 @@
+# Node.js dependencies
+node_modules/
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables file
+.env
+.env.*
+!.env.example
+
+# Uploads directory within the backend
+findsourceurl-backend/uploads/
+
+# Build output (if any)
+dist/
+build/
+
+# Debug files
+error_*.png
+
+# OS generated files
+.DS_Store
+Thumbs.db 
