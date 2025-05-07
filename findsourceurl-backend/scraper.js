@@ -1,15 +1,190 @@
 const puppeteer = require('puppeteer');
-const { Solver } = require('@2captcha/captcha-solver'); // Import 2Captcha Solver
+const https = require('https'); // Use built-in https module
+const querystring = require('querystring'); // For building query strings
 
 // Initialize 2Captcha Solver outside the function if API key is static
 // Ensure TWOCAPTCHA_API_KEY is set as an environment variable
 const captchApiKey = process.env.TWOCAPTCHA_API_KEY;
-let captchaSolver;
-if (captchApiKey) {
-    captchaSolver = new Solver(captchApiKey);
-    console.log('[Scraper] 2Captcha Solver initialized.');
-} else {
-    console.warn('[Scraper] WARNING: TWOCAPTCHA_API_KEY environment variable not set. CAPTCHA solving will be skipped.');
+// Remove Solver initialization
+// let captchaSolver;
+// if (captchApiKey) {
+//     captchaSolver = new Solver(captchApiKey);
+//     console.log('[Scraper] 2Captcha Solver initialized.');
+// } else {
+//     console.warn('[Scraper] WARNING: TWOCAPTCHA_API_KEY environment variable not set. CAPTCHA solving will be skipped.');
+// }
+
+// Helper function for making HTTPS requests and returning JSON
+function httpsRequest(options, postData = null) {
+    return new Promise((resolve, reject) => {
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    // Check if response is likely plain text error before JSON parsing
+                    if (res.statusCode >= 200 && res.statusCode < 300 && !data.startsWith('{')) {
+                        // Handle potential plain text responses like CAPCHA_NOT_READY
+                        resolve(data);
+                    } else if (res.statusCode >= 200 && res.statusCode < 300) {
+                         resolve(JSON.parse(data));
+                    } else {
+                        reject(new Error(`HTTP status code ${res.statusCode}: ${data}`));
+                    }
+                } catch (e) {
+                    reject(new Error(`Failed to parse response JSON: ${e.message}. Response: ${data}`));
+                }
+            });
+        });
+
+        req.on('error', (e) => {
+            reject(new Error(`HTTPS request failed: ${e.message}`));
+        });
+
+        if (postData) {
+            req.write(postData);
+        }
+
+        req.end();
+    });
+}
+
+/**
+ * Attempts to solve reCAPTCHA using the 2Captcha HTTP API directly.
+ * @param {Page} page Puppeteer page instance.
+ * @returns {Promise<string|null>} Resolves with the CAPTCHA token or null if failed.
+ */
+async function handleCaptchaWith2CaptchaDirectAPI(page) {
+    console.log('[Scraper] Attempting to solve CAPTCHA with 2Captcha Direct API...');
+
+    if (!captchApiKey) {
+        console.error('[Scraper] 2Captcha API key not set. Skipping CAPTCHA attempt.');
+        return null;
+    }
+
+    try {
+        const pageUrl = page.url();
+        let sitekey = await page.evaluate(() => {
+            const iframe = document.querySelector('iframe[src*="google.com/recaptcha"]');
+            if (iframe) {
+                const params = new URLSearchParams(new URL(iframe.src).search);
+                return params.get('k');
+            }
+            const elWithSitekey = document.querySelector('[data-sitekey]');
+            if (elWithSitekey) return elWithSitekey.getAttribute('data-sitekey');
+            return null;
+        });
+
+        let dataS = await page.evaluate(() => {
+            const elWithDataS = document.querySelector('[data-s]');
+            return elWithDataS ? elWithDataS.getAttribute('data-s') : null;
+        });
+
+        if (!sitekey) {
+            console.error('[Scraper] CRITICAL: Could not automatically find reCAPTCHA sitekey. Cannot proceed with 2Captcha.');
+            return null;
+        }
+
+        console.log(`[Scraper] Found sitekey: ${sitekey}`);
+        if (dataS) {
+             console.log(`[Scraper] Found data-s: ${dataS}`);
+        } else {
+             console.warn('[Scraper] data-s not found. Proceeding without it, but might be required.');
+        }
+
+        // Step 1: Submit task to /in.php
+        const inParams = {
+            key: captchApiKey,
+            method: 'userrecaptcha',
+            googlekey: sitekey,
+            pageurl: pageUrl,
+            json: 1
+        };
+        if (dataS) {
+            inParams['data-s'] = dataS; // Add data-s parameter directly
+        }
+
+        const postData = querystring.stringify(inParams);
+        const inOptions = {
+            hostname: '2captcha.com',
+            port: 443,
+            path: '/in.php',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Content-Length': Buffer.byteLength(postData)
+            }
+        };
+
+        console.log('[Scraper] Submitting task to 2Captcha /in.php...');
+        const inResponse = await httpsRequest(inOptions, postData);
+
+        if (!inResponse || inResponse.status !== 1) {
+            throw new Error(`2Captcha /in.php error: ${inResponse.request || JSON.stringify(inResponse)}`);
+        }
+
+        const taskId = inResponse.request;
+        console.log(`[Scraper] 2Captcha Task ID: ${taskId}. Polling for result...`);
+
+        // Step 2: Poll /res.php for the result
+        const resParams = {
+            key: captchApiKey,
+            action: 'get',
+            id: taskId,
+            json: 1
+        };
+        const resQueryString = querystring.stringify(resParams);
+        const resOptions = {
+            hostname: '2captcha.com',
+            port: 443,
+            path: `/res.php?${resQueryString}`,
+            method: 'GET'
+        };
+
+        const startTime = Date.now();
+        const timeoutMs = 180000; // 3 minutes timeout for polling
+        const pollIntervalMs = 10000; // Poll every 10 seconds
+
+        while (Date.now() - startTime < timeoutMs) {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+            console.log(`[Scraper] Polling 2Captcha /res.php for task ${taskId}...`);
+            const resResponse = await httpsRequest(resOptions);
+
+            // Check for "Not Ready" status (both plain text and JSON format)
+            let isNotReady = false;
+            if (typeof resResponse === 'string' && resResponse === 'CAPCHA_NOT_READY') {
+                isNotReady = true;
+            }
+            if (typeof resResponse === 'object' && resResponse !== null && resResponse.status === 0 && resResponse.request === 'CAPCHA_NOT_READY') {
+                 isNotReady = true;
+            }
+
+            if (isNotReady) {
+                console.log('[Scraper] CAPCHA_NOT_READY, polling again...');
+                continue;
+            }
+
+            // Check for success
+            if (typeof resResponse === 'object' && resResponse !== null && resResponse.status === 1) {
+                console.log('[Scraper] 2Captcha task solved!');
+                return resResponse.request; // Return the token
+            }
+
+            // If it's not "Not Ready" and not Success, it's an error or unexpected response
+            console.error('[Scraper] Received error or unexpected response from /res.php:', resResponse);
+            throw new Error(`2Captcha /res.php error or unexpected response: ${typeof resResponse === 'string' ? resResponse : JSON.stringify(resResponse)}`);
+        }
+
+        // Timeout reached
+        throw new Error(`2Captcha polling timed out after ${timeoutMs / 1000} seconds.`);
+
+    } catch (error) {
+        console.error('[Scraper] Error during 2Captcha Direct API process:', error.message || error);
+        if(page) await page.screenshot({ path: 'error_screenshot_captcha_direct_api_failed.png' });
+        return null; // Indicate failure
+    }
 }
 
 /**
@@ -79,78 +254,48 @@ async function findImageSourceUrls(imagePath) {
             console.warn(`[Scraper] Initial wait for results container (${resultsPageLoadSelector}) failed within 5s. Assuming CAPTCHA or slow load.`);
             if (page) await page.screenshot({ path: 'error_screenshot_before_captcha_solve.png' });
 
-            if (!captchaSolver) {
-                console.error('[Scraper] 2Captcha solver not initialized. Skipping CAPTCHA attempt.');
-                throw new Error('Results page did not load (CAPTCHA suspected, solver not available).');
+            // *** Call the new direct API function ***
+            const captchaToken = await handleCaptchaWith2CaptchaDirectAPI(page);
+
+            if (!captchaToken) {
+                // Error handling within handleCaptchaWith2CaptchaDirectAPI already logs details and takes screenshot
+                throw new Error('Failed to solve CAPTCHA using direct API or results page did not load after attempt.');
             }
 
-            console.log('[Scraper] Attempting to solve CAPTCHA with 2Captcha...');
-            try {
-                const pageUrl = page.url();
-                let sitekey = await page.evaluate(() => {
-                    const iframe = document.querySelector('iframe[src*="google.com/recaptcha"]');
-                    if (iframe) {
-                        const params = new URLSearchParams(new URL(iframe.src).search);
-                        return params.get('k');
-                    }
-                    const elWithSitekey = document.querySelector('[data-sitekey]');
-                    if (elWithSitekey) return elWithSitekey.getAttribute('data-sitekey');
-                    return null;
-                });
+            console.log(`[Scraper] Direct API returned Token: ${captchaToken.substring(0,20)}... Injecting token.`);
 
-                if (!sitekey) {
-                    console.error('[Scraper] CRITICAL: Could not automatically find reCAPTCHA sitekey. Cannot proceed with 2Captcha.');
-                    throw new Error('Failed to find reCAPTCHA sitekey for 2Captcha.');
-                }
-                
-                console.log(`[Scraper] Using pageUrl: ${pageUrl} and sitekey: ${sitekey}`);
-                
-                // Corrected parameters based on error message: pass parameters as an object.
-                // Using property names based on Python SDK examples (`sitekey`, `url`)
-                const result = await captchaSolver.recaptcha({
-                    sitekey: sitekey, 
-                    url: pageUrl // Changed from pageUrl as separate arg to url property in object
-                    // We might still need other options depending on the captcha type, e.g.:
-                    // version: 'v2', 
-                    // action: 'some_action', 
-                    // enterprise: 1,
-                    // invisible: 1
-                }); 
-                const captchaToken = result.data;
-                console.log(`[Scraper] 2Captcha request ID: ${result.id}, Token: ${captchaToken.substring(0,20)}...`);
-
-                await page.evaluate((token) => {
-                    const textarea = document.getElementById('g-recaptcha-response');
-                    if (textarea) textarea.value = token;
-                    // Attempt to find a submit button related to the captcha or a general form submit
-                    // This is highly speculative
-                    const buttons = document.querySelectorAll('input[type="submit"], button[type="submit"]');
-                    let submitted = false;
+            // Inject the token into the page
+            await page.evaluate((token) => {
+                const textarea = document.getElementById('g-recaptcha-response');
+                if (textarea) textarea.value = token;
+                // Optional: Attempt to find and click a submit button if needed, though often submission is automatic
+                try {
+                    const buttons = document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type]), input[type="button"]'); // Broader button selection
+                    console.log(`Found ${buttons.length} potential submit buttons.`);
+                    let clicked = false;
                     buttons.forEach(button => {
-                        // Check if the button is visible and potentially related to submitting the captcha/form
-                        if (button.offsetParent !== null && !submitted) { // visible
-                            // More specific checks could be added here (e.g. button text or nearby elements)
-                            // For a Google /sorry page, the submission might be automatic after token, or a specific button.
-                            // button.click(); 
-                            // submitted = true;
-                            // console.log('Attempted to click a submit button.');
+                        // Basic visibility check and avoid clicking multiple times
+                        if (button.offsetParent !== null && !clicked) {
+                           console.log(`Attempting to click button: ${button.outerHTML.substring(0, 100)}...`);
+                           button.click();
+                           clicked = true;
                         }
                     });
-                }, captchaToken);
-                
-                console.log('[Scraper] CAPTCHA token injected. Trying to submit or waiting for page to proceed...');
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Increased wait for JS to process
+                    if (!clicked) {
+                        console.log('No visible submit button found or clicked after token injection.');
+                    }
+                } catch (e) {
+                     console.error('Error trying to click submit button:', e.message);
+                }
+            }, captchaToken);
 
-                console.log('[Scraper] Retrying to wait for results container after CAPTCHA attempt...');
-                await page.waitForSelector(resultsPageLoadSelector, { visible: true, timeout: 20000 });
-                console.log('[Scraper] Results container found after CAPTCHA solve attempt!');
-                initialWaitSuccess = true;
+            console.log('[Scraper] CAPTCHA token injected and submit attempted. Waiting longer for page to proceed after direct API solve...');
+            await new Promise(resolve => setTimeout(resolve, 15000)); // Increased wait to 15 seconds
 
-            } catch (captchaError) {
-                console.error('[Scraper] Error during 2Captcha solving process:', captchaError.message || captchaError);
-                if(page) await page.screenshot({ path: 'error_screenshot_captcha_solve_failed.png' });
-                throw new Error(`Failed to solve CAPTCHA or results page did not load after attempt: ${captchaError.message || captchaError}`);
-            }
+            console.log('[Scraper] Retrying to wait for results container after CAPTCHA attempt...');
+            await page.waitForSelector(resultsPageLoadSelector, { visible: true, timeout: 20000 });
+            console.log('[Scraper] Results container found after CAPTCHA solve attempt!');
+            initialWaitSuccess = true;
         }
 
         if (!initialWaitSuccess) {
