@@ -43,8 +43,8 @@ def capture_and_encode_screenshot(filename="screenshot.png", use_manual_file=Non
                 print(f"错误：手动提供的截图文件不存在: {use_manual_file}")
                 return None
         else:
-            print("准备实时截图，请确保目标窗口在前台且内容已加载。等待0.5秒...")
-            time.sleep(0.5) 
+            # print("准备实时截图，请确保目标窗口在前台且内容已加载。等待0.5秒...") # 可以更短或省略，因为后续有等待
+            time.sleep(0.2) # 略微等待
             screenshot = pyautogui.screenshot()
             # 将实时截图始终保存，以便调试或后续模板匹配 (如果需要基于特定截图)
             saved_filename = f"realtime__{filename}"
@@ -135,9 +135,9 @@ if __name__ == "__main__":
     google_images_url = "https://images.google.com/"
     print(f"正在尝试自动打开浏览器并导航到: {google_images_url}")
     webbrowser.open_new_tab(google_images_url)
-    print("已发送打开网页的指令。请等待页面加载（约10-12秒）。")
+    print("已发送打开网页的指令。请等待页面加载（约5-7秒）。") # 缩短等待
     print("重要提示：请在页面加载后，手动确保浏览器窗口是活动且最大化的，以便后续的图像识别能准确工作。")
-    time.sleep(12) # 增加等待时间以确保页面加载和用户有机会调整窗口
+    time.sleep(7) # 缩短浏览器初始加载等待
 
     # --- 步骤 1: 使用图像模板定位并点击相机图标 --- 
     print("\n--- 步骤 1: 使用图像模板定位并点击相机图标 --- ")
@@ -147,28 +147,28 @@ if __name__ == "__main__":
 
     camera_clicked_successfully = False
     try:
-        print(f"正在屏幕上查找相机图标模板: '{CAMERA_ICON_TEMPLATE_PATH}'...")
+        print(f"查找相机图标模板: '{CAMERA_ICON_TEMPLATE_PATH}'...")
         confidence_level_camera = 0.8 
         camera_coords = pyautogui.locateCenterOnScreen(CAMERA_ICON_TEMPLATE_PATH, confidence=confidence_level_camera)
         
         if camera_coords:
-            print(f"通过模板成功定位到相机图标坐标: {camera_coords}")
-            print(f"准备将鼠标移动到坐标 {camera_coords} 并点击 (2秒后执行)")
-            time.sleep(2)
-            pyautogui.moveTo(camera_coords[0], camera_coords[1], duration=0.5) # 快速移动
+            print(f"找到相机图标: {camera_coords}")
+            # print(f"准备将鼠标移动到坐标 {camera_coords} 并点击 (0.5秒后执行)") # 可以简化提示
+            time.sleep(0.5) # 缩短等待
+            pyautogui.moveTo(camera_coords[0], camera_coords[1], duration=0.25) # 加快移动
             pyautogui.click(camera_coords[0], camera_coords[1])
             print("已点击相机图标。")
             camera_clicked_successfully = True
             print("等待'上传文件'对话框加载...")
-            time.sleep(3)
+            time.sleep(1.5) # 缩短等待上传对话框
         else:
-            print(f"未能通过模板 '{CAMERA_ICON_TEMPLATE_PATH}' 找到相机图标 (confidence={confidence_level_camera})。")
+            print(f"未能通过模板找到相机图标 (confidence={confidence_level_camera})。")
             # ... (fallback AI analysis can be kept or simplified) ...
 
     except pyautogui.ImageNotFoundException:
-        print(f"PyAutoGUI错误：屏幕上找不到相机图标模板 '{CAMERA_ICON_TEMPLATE_PATH}'。")
+        print(f"错误：屏幕上找不到相机图标模板 '{CAMERA_ICON_TEMPLATE_PATH}'。")
     except Exception as e:
-        print(f"在相机图标模板匹配或点击过程中发生错误: {e}")
+        print(f"相机图标处理错误: {e}")
 
     upload_button_clicked_successfully = False
     if camera_clicked_successfully:
@@ -178,31 +178,31 @@ if __name__ == "__main__":
             print(f"请先创建 '{UPLOAD_BUTTON_TEMPLATE_PATH}' 文件后再试。")
         else:
             try:
-                print(f"正在屏幕上查找上传按钮模板: '{UPLOAD_BUTTON_TEMPLATE_PATH}'...")
-                print("请确保'上传文件'对话框/区域在屏幕上清晰可见（等待3秒）。")
-                time.sleep(3)
+                print(f"查找上传按钮模板: '{UPLOAD_BUTTON_TEMPLATE_PATH}'...")
+                time.sleep(0.5) # 查找前略微等待，确保对话框元素稳定
                 confidence_level_upload = 0.8 
                 upload_coords = pyautogui.locateCenterOnScreen(UPLOAD_BUTTON_TEMPLATE_PATH, confidence=confidence_level_upload)
                 
                 if upload_coords:
-                    print(f"通过模板成功定位到上传按钮坐标: {upload_coords}")
-                    pyautogui.moveTo(upload_coords[0], upload_coords[1], duration=0.5)
-                    print("已移动到上传按钮，准备点击 (2秒后执行)。")
-                    time.sleep(2)
+                    print(f"找到上传按钮: {upload_coords}")
+                    pyautogui.moveTo(upload_coords[0], upload_coords[1], duration=0.25) # 加快移动
+                    # print("已移动到上传按钮，准备点击 (0.5秒后执行)。") # 简化提示
+                    time.sleep(0.5) # 缩短等待
                     pyautogui.click(upload_coords[0], upload_coords[1])
                     print("已点击上传按钮。")
                     upload_button_clicked_successfully = True
-                    print("等待文件选择对话框出现并获取焦点...")
-                    time.sleep(2) # 重要：给文件对话框足够时间出现和获得焦点
+                    print("等待文件选择对话框出现...")
+                    time.sleep(1) # 缩短等待文件对话框
                 else:
-                    print(f"未能通过模板 '{UPLOAD_BUTTON_TEMPLATE_PATH}' 找到上传按钮 (confidence={confidence_level_upload})。")
+                    print(f"未能通过模板找到上传按钮 (confidence={confidence_level_upload})。")
                     print("请检查模板图片是否准确，以及上传对话框是否在屏幕上清晰可见。")
             except pyautogui.ImageNotFoundException:
-                print(f"PyAutoGUI错误：屏幕上找不到上传按钮模板 '{UPLOAD_BUTTON_TEMPLATE_PATH}'。")
+                print(f"错误：屏幕上找不到上传按钮模板 '{UPLOAD_BUTTON_TEMPLATE_PATH}'。")
             except Exception as e:
-                print(f"在上传按钮模板匹配或点击过程中发生错误: {e}")
+                print(f"上传按钮处理错误: {e}")
     else:
-        print("前序步骤未能成功点击相机图标，脚本终止。")
+        if camera_clicked_successfully: # 只有在相机点击成功但上传按钮失败时才显示此消息
+             print("前序步骤未能成功点击相机图标，脚本终止。")   
 
     if upload_button_clicked_successfully:
         print("\n--- 步骤 3: 处理文件上传（选择文件） --- ")
@@ -210,39 +210,43 @@ if __name__ == "__main__":
         # 获取要上传图片的绝对路径，以提高可靠性
         try:
             image_to_upload_abs_path = os.path.abspath(YOUR_IMAGE_TO_UPLOAD_PATH)
-            print(f"将要上传的图片绝对路径: {image_to_upload_abs_path}")
+            print(f"上传图片路径: {image_to_upload_abs_path}")
 
             if not os.path.exists(image_to_upload_abs_path):
                 print(f"错误：要上传的图片 '{image_to_upload_abs_path}' 不存在！请检查路径和文件名。")
             else:
-                print(f"准备输入文件路径: '{image_to_upload_abs_path}' (3秒后执行)")
-                print("请不要操作鼠标和键盘，确保文件选择对话框是当前活动窗口。")
-                time.sleep(3)
-                
-                pyautogui.write(image_to_upload_abs_path, interval=0.05) # interval模拟人工输入速度，增加稳定性
+                # print(f"准备输入文件路径: '{image_to_upload_abs_path}' (1秒后执行)") # 简化提示
+                print("确保文件选择对话框是当前活动窗口。不要操作键鼠。")
+                time.sleep(1) # 缩短等待，但确保对话框已获取焦点
+                pyautogui.write(image_to_upload_abs_path, interval=0.02) # 加快输入
                 print("文件路径已输入。")
-                time.sleep(1) # 输入后稍作停顿
+                time.sleep(0.25) # 缩短输入后停顿
                 
-                print("准备按 Enter 键确认文件选择 (1秒后执行)。")
-                time.sleep(1)
+                # print("准备按 Enter 键确认 (0.25秒后执行)。") # 简化提示
+                time.sleep(0.25)
                 pyautogui.press('enter')
                 print("已模拟按 Enter 键。")
                 
-                print("等待图片上传和页面跳转 (约10秒)... 请观察浏览器。")
-                # 这里的等待时间可能需要根据网络情况和图片大小调整
-                # 后续我们需要一种更可靠的方式来判断页面是否加载完毕，比如查找结果页的特定模板
-                time.sleep(10) 
-                print("--- 步骤 4: 分析搜索结果页面 (占位符) --- ")
-                print("下一步将是捕获搜索结果页面截图，并使用新模板或AI分析来提取源URL。")
+                print("等待图片上传和页面跳转 (约5-7秒)... 请观察浏览器。") # 缩短
+                time.sleep(7) 
+                print("\n--- 步骤 4: 模拟浏览搜索结果页面 --- ")
+                print("图片已上传，结果页面应已加载。现在模拟向下滚动浏览。")
+                scroll_amount = -500  # 增加每次滚动幅度
+                scroll_iterations = 5 # 增加滚动次数
+                for i in range(scroll_iterations):
+                    pyautogui.scroll(scroll_amount)
+                    print(f"已向下滚动 ({i+1}/{scroll_iterations})")
+                    time.sleep(0.6) # 略微减少滚动间隙，但保持平滑感
+                print("已完成模拟滚动浏览。")
 
         except Exception as e:
-            print(f"在处理文件上传步骤中发生错误: {e}")
+            print(f"文件上传或模拟浏览步骤错误: {e}")
             
     else:
         if camera_clicked_successfully: # 只有在相机点击成功但上传按钮失败时才显示此消息
              print("未能成功点击上传按钮，无法继续文件上传步骤。")   
 
-    print("\n脚本主要流程执行完毕。")
+    print("\n脚本所有自动化步骤演示完毕。")
 
 
     print("\n脚本执行完毕 (目前仅移动鼠标，未实际点击)。")
