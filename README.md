@@ -1,4 +1,4 @@
-# FindSourceURL 💡 面向Web交互的AI Agent与UI自动化
+# FindSourceURL 
 
 ## 简介 (Executive Summary)
 
@@ -12,15 +12,17 @@
 
 项目演示视频展示了最终 PyAutoGUI 方案的自动化流程。您可以直接在此处观看：
 
-<video controls src="./findsourceurl-agent/findsourceurl.mp4" title="项目演示视频" style="max-width: 100%;"></video>
 
-如果视频无法加载，您也可以在仓库中找到它：[`findsourceurl-agent/findsourceurl.mp4`](./findsourceurl-agent/findsourceurl.mp4)。
+
+
+https://github.com/user-attachments/assets/027f9262-2381-419d-be1a-12af33a764e7
+
 
 ## 🎯 项目目标 (Project Goal)
 
 *   **核心任务**: 完成根据图片（网页截图）自动查找其原始来源网站 URL 的面试任务。
 *   **技术探索**: 深入研究并实践 **AI Agent** 在复杂、动态网页自动化任务中的应用潜力，特别是结合 **多模态视觉理解** 能力。
-*   **原型构建**: 创建一个可扩展的自动化工具原型，为未来部署到 `findsourceurl.com` 奠定基础。
+*   **原型构建**: 创建一个可扩展的自动化工具原型。
 
 ## 🤖 AI Agent 探索与设计 (AI Agent Exploration & Design)
 
@@ -35,7 +37,7 @@
 
 **2. 🛠️ 为 Agent 设计的核心工具集:**
 
-为了让 Agent 能够与浏览器环境交互，我们设计并实现了以下关键工具（基于 Python 和 Playwright/PyAutoGUI 的早期探索）：
+为了让 Agent 能够与浏览器环境交互，我们设计并实现了以下关键工具：
 
 *   `browse_web_page(url: str)`: 打开指定URL，并返回页面的文本内容和关键的屏幕截图 (Base64编码)，供 Agent 进行视觉分析。
 *   `analyze_vision(screenshot: str, objective: str)`: 调用 GPT-4o Vision API，分析截图，根据当前目标（如"找到相机图标"、"找到上传按钮"）输出下一步操作指令或需要交互的目标元素的描述/大致位置。
@@ -135,7 +137,7 @@ FindSourceURL/                  # 项目根目录
 
 本项目是一次从先进理念到务实落地的完整探索，挑战与迭代贯穿始终：
 
-1.  **🚧 初始方案遇阻 (Web Automation APIs)**:
+1.  **🚧 初始方案 (Web Automation APIs)**:
     *   **挑战**: 早期使用 Playwright/Puppeteer 等标准库，直面 reCAPTCHA 等反爬虫机制，难以稳定自动化。
     *   **反思**: 促使思考转向更接近人类交互的桌面自动化模式。
 
