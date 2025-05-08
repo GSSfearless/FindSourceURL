@@ -1,4 +1,6 @@
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 const https = require('https'); // Use built-in https module
 const querystring = require('querystring'); // For building query strings
 
@@ -195,24 +197,56 @@ async function handleCaptchaWith2CaptchaDirectAPI(page) {
 async function findImageSourceUrls(imagePath) {
     console.log(`[Scraper] Starting browser for image: ${imagePath}`);
     let browser = null;
-    let page = null; // Declare page here to access in final catch
+    let page = null;
     const foundUrls = [];
 
     try {
-        browser = await puppeteer.launch({ headless: false });
-        page = await browser.newPage(); // Assign to outer scope variable
+        browser = await puppeteer.launch({ 
+            headless: false, 
+            // slowMo: 50, // You can uncomment and adjust slowMo for visual debugging
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                // '--window-size=1366,768', // Setting viewport is usually enough
+            ]
+        });
+        page = await browser.newPage();
         await page.setViewport({ width: 1366, height: 768 });
+        // await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36'); // Example of a specific UA
         
         console.log('[Scraper] Navigating to Google Images...');
-        await page.goto('https://images.google.com/', { waitUntil: 'networkidle2' });
+        try {
+            await page.goto('https://images.google.com/', { waitUntil: 'networkidle0', timeout: 25000 });
+            await page.waitForTimeout(2000); // Extra wait for dynamic content
+        } catch (navError) {
+            console.error('[Scraper] Error navigating to Google Images:', navError.message);
+            if (page) await page.screenshot({ path: 'error_screenshot_navigation_failed.png' });
+            throw new Error('Navigation to Google Images failed.');
+        }
 
         console.log('[Scraper] Looking for camera icon...');
-        const cameraIconSelector = 'div[aria-label="按图搜索"]';
+        const cameraIconSelector = 'div[aria-label="按图搜索"]'; // Aria label for Chinese UI
+        // const cameraIconSelectorAlternate = 'div[aria-label="Search by image"]'; // For English UI, keep as a note
         try {
-            await page.waitForSelector(cameraIconSelector, { visible: true, timeout: 10000 });
+            await page.waitForSelector(cameraIconSelector, { visible: true, timeout: 20000 }); // Increased timeout
             await page.click(cameraIconSelector);
+            console.log('[Scraper] Camera icon clicked.');
         } catch (error) {
-            console.error(`[Scraper] Error finding or clicking camera icon (${cameraIconSelector}):`, error);
+            console.error(`[Scraper] Error finding or clicking camera icon (${cameraIconSelector}):`, error.message);
+            if (page) {
+                const currentUrl = page.url();
+                console.log(`[Scraper] URL when camera icon not found: ${currentUrl}`);
+                try {
+                    const pageContent = await page.content();
+                    console.log('[Scraper] Page content when camera icon not found (first 1000 chars):', pageContent.substring(0, 1000));
+                    require('fs').writeFileSync('debug_page_content_camera_icon_failed.html', pageContent);
+                    console.log('[Scraper] Full page content saved to debug_page_content_camera_icon_failed.html');
+                } catch (contentError) {
+                    console.error('[Scraper] Could not get page content when camera icon failed:', contentError.message);
+                }
+                await page.screenshot({ path: 'error_screenshot_camera_icon_failed.png' });
+                console.log('[Scraper] Screenshot saved to error_screenshot_camera_icon_failed.png');
+            }
             throw new Error('Could not interact with camera icon.');
         }
 
@@ -254,48 +288,64 @@ async function findImageSourceUrls(imagePath) {
             console.warn(`[Scraper] Initial wait for results container (${resultsPageLoadSelector}) failed within 5s. Assuming CAPTCHA or slow load.`);
             if (page) await page.screenshot({ path: 'error_screenshot_before_captcha_solve.png' });
 
-            // *** Call the new direct API function ***
             const captchaToken = await handleCaptchaWith2CaptchaDirectAPI(page);
 
             if (!captchaToken) {
-                // Error handling within handleCaptchaWith2CaptchaDirectAPI already logs details and takes screenshot
-                throw new Error('Failed to solve CAPTCHA using direct API or results page did not load after attempt.');
+                throw new Error('Failed to solve CAPTCHA using direct API.');
             }
+            console.log(`[Scraper] Direct API returned Token: ${captchaToken.substring(0,20)}...`);
 
-            console.log(`[Scraper] Direct API returned Token: ${captchaToken.substring(0,20)}... Injecting token.`);
+            const currentUrlAfterCaptchaSolve = page.url();
+            console.log(`[Scraper] URL immediately after CAPTCHA solve: ${currentUrlAfterCaptchaSolve}`);
 
-            // Inject the token into the page
-            await page.evaluate((token) => {
-                const textarea = document.getElementById('g-recaptcha-response');
-                if (textarea) textarea.value = token;
-                // Optional: Attempt to find and click a submit button if needed, though often submission is automatic
+            if (currentUrlAfterCaptchaSolve.includes('/sorry/index')) {
+                console.log('[Scraper] Confirmed on /sorry/index page. Attempting to reconstruct URL with token.');
                 try {
-                    const buttons = document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type]), input[type="button"]'); // Broader button selection
-                    console.log(`Found ${buttons.length} potential submit buttons.`);
-                    let clicked = false;
-                    buttons.forEach(button => {
-                        // Basic visibility check and avoid clicking multiple times
-                        if (button.offsetParent !== null && !clicked) {
-                           console.log(`Attempting to click button: ${button.outerHTML.substring(0, 100)}...`);
-                           button.click();
-                           clicked = true;
-                        }
-                    });
-                    if (!clicked) {
-                        console.log('No visible submit button found or clicked after token injection.');
+                    const urlObject = new URL(currentUrlAfterCaptchaSolve);
+                    const qParam = urlObject.searchParams.get('q');
+                    const continueParam = urlObject.searchParams.get('continue');
+
+                    if (qParam && continueParam) {
+                        const newNavUrl = `https://www.google.com/sorry/index?q=${encodeURIComponent(qParam)}&continue=${encodeURIComponent(continueParam)}&g-recaptcha-response=${encodeURIComponent(captchaToken)}`;
+                        console.log(`[Scraper] Constructed new navigation URL: ${newNavUrl.substring(0, 250)}...`);
+                        await page.goto(newNavUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                        console.log('[Scraper] Navigated to new reconstructed URL with token.');
+                    } else {
+                        console.warn('[Scraper] Could not extract q and continue parameters from /sorry/index URL. Fallback: Submitting on current page.');
+                        await injectAndSubmitToken(page, captchaToken);
                     }
-                } catch (e) {
-                     console.error('Error trying to click submit button:', e.message);
+                } catch (urlParseError) {
+                    console.error('[Scraper] Error parsing current URL or navigating to reconstructed URL. Fallback: Submitting on current page.', urlParseError);
+                    await injectAndSubmitToken(page, captchaToken); 
                 }
-            }, captchaToken);
-
-            console.log('[Scraper] CAPTCHA token injected and submit attempted. Waiting longer for page to proceed after direct API solve...');
-            await new Promise(resolve => setTimeout(resolve, 15000)); // Increased wait to 15 seconds
-
-            console.log('[Scraper] Retrying to wait for results container after CAPTCHA attempt...');
-            await page.waitForSelector(resultsPageLoadSelector, { visible: true, timeout: 20000 });
-            console.log('[Scraper] Results container found after CAPTCHA solve attempt!');
-            initialWaitSuccess = true;
+            } else {
+                console.log(`[Scraper] Not on /sorry/index (URL: ${currentUrlAfterCaptchaSolve}). CAPTCHA was present. Fallback: Submitting on current page.`);
+                await injectAndSubmitToken(page, captchaToken);
+            }
+            
+            console.log('[Scraper] Retrying to wait for results container after CAPTCHA navigation/submission...');
+            try {
+                await page.waitForSelector(resultsPageLoadSelector, { visible: true, timeout: 20000 });
+                console.log('[Scraper] Results container found after CAPTCHA solve attempt!');
+                initialWaitSuccess = true;
+            } catch (e_after_captcha) {
+                console.error(`[Scraper] Still could not find results container (${resultsPageLoadSelector}) after CAPTCHA. Error: ${e_after_captcha.message}`);
+                if (page) {
+                    const currentUrl = page.url();
+                    console.log(`[Scraper] Current page URL when div#search failed after captcha: ${currentUrl}`);
+                    try {
+                        const pageContent = await page.content();
+                        console.log('[Scraper] Page content when div#search failed after captcha (first 2000 chars):', pageContent.substring(0, 2000));
+                        // For full content, you might write it to a file if it's too long for console
+                        // require('fs').writeFileSync('debug_page_content_after_captcha.html', pageContent);
+                    } catch (contentError) {
+                        console.error('[Scraper] Could not get page content after captcha failure:', contentError.message);
+                    }
+                    await page.screenshot({ path: 'error_screenshot_after_captcha_div_search_failed.png' });
+                    console.log('[Scraper] Screenshot saved to error_screenshot_after_captcha_div_search_failed.png');
+                }
+                throw e_after_captcha; // Re-throw the error to be caught by the outer try-catch
+            }
         }
 
         if (!initialWaitSuccess) {
@@ -368,30 +418,92 @@ async function findImageSourceUrls(imagePath) {
     return foundUrls;
 }
 
-// --- Test Section ---
-async function runTest() {
-    if (!captchApiKey) {
-        console.error("\n--- Test run failed: TWOCAPTCHA_API_KEY environment variable is not set. ---");
-        return;
+async function injectAndSubmitToken(page, token) {
+    console.log(`[Scraper] Injecting token: ${token.substring(0,20)}... and attempting submit on current page.`);
+    await page.evaluate((tk) => {
+        const textarea = document.getElementById('g-recaptcha-response');
+        if (textarea) textarea.value = tk;
+        try {
+            const buttons = document.querySelectorAll('input[type="submit"], button[type="submit"], button:not([type]), input[type="button"]');
+            console.log(`Found ${buttons.length} potential submit buttons.`);
+            let clicked = false;
+            buttons.forEach(button => {
+                if (button.offsetParent !== null && !clicked) {
+                    console.log(`Attempting to click button: ${button.outerHTML.substring(0, 100)}...`);
+                    button.click();
+                    clicked = true;
+                }
+            });
+            if (!clicked) {
+                console.log('No visible submit button found or clicked after token injection.');
+            }
+        } catch (e) {
+            console.error('Error trying to click submit button during injection:', e.message);
+        }
+    }, token);
+    await new Promise(resolve => setTimeout(resolve, 15000)); // Wait for page to process
+}
+
+// --- Main Execution ---
+async function main() {
+    const imagePathArg = process.argv[2]; // Get image path from command line argument
+
+    if (!imagePathArg) {
+        console.error('[Scraper] Error: No image path provided via command line argument.');
+        console.log('[Scraper] Usage: node scraper.js <path_to_image_file>');
+        process.exit(1); // Exit with an error code
     }
-    const testImagePath = 'C:\\Github\\FindSourceURL\\data\\github.png';
+
+    console.log(`[Scraper] Received image path from argument: ${imagePathArg}`);
+
     try {
-        const urls = await findImageSourceUrls(testImagePath);
-        if (urls.length > 0) {
-            console.log('\n--- Found Source URLs ---');
+        // Ensure the path is treated as absolute, or resolve it if it might be relative
+        // For now, assuming api.js sends an absolute path. If issues persist, we might need path.resolve here.
+        const urls = await findImageSourceUrls(imagePathArg);
+
+        if (urls && urls.length > 0) {
+            console.log('--- Found Source URLs ---');
             urls.forEach(url => console.log(url));
         } else {
-            console.log('\n--- No source URLs found for this image. ---');
+            // findImageSourceUrls should handle its own "No source URLs found" message before this,
+            // but as a fallback or if it throws before printing that.
+            console.log('--- No source URLs found for this image. ---');
         }
-    } catch (err) {
-        console.error('\n--- Test run failed ---', err.message || err);
+        process.exit(0); // Success
+    } catch (error) {
+        console.error('[Scraper] Critical error during main execution:', error.message || error);
+        // Ensure the specific "no URLs found" marker is printed on any critical failure
+        // if it hasn't been printed by findImageSourceUrls already.
+        // This helps api.js determine the outcome.
+        if (!console.log.toString().includes('--- No source URLs found for this image. ---')) {
+             console.log('--- No source URLs found for this image. ---');
+        }
+        process.exit(1); // Indicate failure
     }
 }
 
-// Ensure this is imagePath, not testImagePath if runTest is called from elsewhere
-// For direct execution: 
-if (require.main === module) { // Only run test if script is executed directly
-    runTest(); 
+// Call the main function to start the process
+main();
+
+// Remove or comment out any old test execution code, for example:
+/*
+async function runTest() {
+    const testImagePath = 'C:\\Github\\FindSourceURL\\data\\github.png'; // Example of hardcoded path
+    console.log(`[Scraper] Running test with image: ${testImagePath}`);
+    try {
+        const urls = await findImageSourceUrls(testImagePath);
+        if (urls && urls.length > 0) {
+            console.log('--- Found Source URLs ---');
+            urls.forEach(url => console.log(url));
+        } else {
+            console.log('--- No source URLs found for this image. ---');
+        }
+    } catch (error) {
+        console.error('[Scraper] Test run failed:', error);
+        console.log('--- No source URLs found for this image. ---');
+    }
 }
+// runTest(); // Ensure this is commented out or removed
+*/
 
 module.exports = { findImageSourceUrls }; 
