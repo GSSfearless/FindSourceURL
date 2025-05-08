@@ -1,0 +1,5 @@
+pyautogui
+openai
+python-dotenv
+opencv-python
+pyperclip 

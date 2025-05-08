@@ -5,6 +5,7 @@ import os
 import time
 import re # 导入正则表达式模块
 import webbrowser # 导入webbrowser模块
+import pyperclip # 导入 pyperclip
 from dotenv import load_dotenv
 
 # 加载 .env 文件中的环境变量
@@ -21,6 +22,7 @@ client = openai.OpenAI(api_key=OPENAI_API_KEY)
 # 全局变量，用于模板图片名称
 CAMERA_ICON_TEMPLATE_PATH = "camera_icon_template.png"
 UPLOAD_BUTTON_TEMPLATE_PATH = "upload_button_template.png" # 新增上传按钮模板路径
+DIALOG_OPEN_BUTTON_TEMPLATE_PATH = "open_button_template.png" # 新增打开按钮模板
 # 将使用 data 目录下的 github.png
 YOUR_IMAGE_TO_UPLOAD_PATH = os.path.join("data", "github.png") 
 
@@ -184,8 +186,8 @@ if __name__ == "__main__":
                     pyautogui.click(upload_coords[0], upload_coords[1])
                     print("已点击上传按钮。")
                     upload_button_clicked_successfully = True
-                    print("等待文件选择对话框出现...")
-                    time.sleep(1) # 缩短等待文件对话框
+                    print("等待文件选择对话框出现并获取焦点...")
+                    time.sleep(2) # 缩短等待文件对话框
                 else:
                     print(f"未能通过模板找到上传按钮 (confidence={confidence_level_upload})。")
                     print("请检查模板图片是否准确，以及上传对话框是否在屏幕上清晰可见。")
@@ -197,43 +199,68 @@ if __name__ == "__main__":
         if camera_clicked_successfully: # 只有在相机点击成功但上传按钮失败时才显示此消息
              print("前序步骤未能成功点击相机图标，脚本终止。")   
 
+    file_selected_successfully = False
     if upload_button_clicked_successfully:
         print("\n--- 步骤 3: 处理文件上传（选择文件） --- ")
         
         # 获取要上传图片的绝对路径，以提高可靠性
         try:
             image_to_upload_abs_path = os.path.abspath(YOUR_IMAGE_TO_UPLOAD_PATH)
-            print(f"上传图片路径: {image_to_upload_abs_path}")
+            print(f"将要上传的图片绝对路径 (用于剪贴板): {image_to_upload_abs_path}")
 
-            if not os.path.exists(image_to_upload_abs_path):
-                print(f"错误：要上传的图片 '{image_to_upload_abs_path}' 不存在！请检查路径和文件名。")
+            if not os.path.exists(image_to_upload_abs_path): # 检查原始路径是否存在
+                print(f"错误：要上传的图片 '{image_to_upload_abs_path}' 不存在！")
             else:
-                # print(f"准备输入文件路径: '{image_to_upload_abs_path}' (1秒后执行)") # 简化提示
-                print("确保文件选择对话框是当前活动窗口。不要操作键鼠。")
-                time.sleep(1) # 缩短等待，但确保对话框已获取焦点
-                pyautogui.write(image_to_upload_abs_path, interval=0.02) # 加快输入
-                print("文件路径已输入。")
-                time.sleep(0.25) # 缩短输入后停顿
+                print(f"准备将路径复制到剪贴板并粘贴 (确保对话框焦点)... ")
+                time.sleep(1) # 确保对话框已获取焦点
                 
-                # print("准备按 Enter 键确认 (0.25秒后执行)。") # 简化提示
-                time.sleep(0.25)
-                pyautogui.press('enter')
-                print("已模拟按 Enter 键。")
-                
-                print("等待图片上传和页面跳转 (约5-7秒)... 请观察浏览器。") # 缩短
-                time.sleep(7) 
-                print("\n--- 步骤 4: 模拟浏览搜索结果页面 --- ")
-                print("图片已上传，结果页面应已加载。现在模拟向下滚动浏览。")
-                scroll_amount = -500  # 增加每次滚动幅度
-                scroll_iterations = 5 # 增加滚动次数
-                for i in range(scroll_iterations):
-                    pyautogui.scroll(scroll_amount)
-                    print(f"已向下滚动 ({i+1}/{scroll_iterations})")
-                    time.sleep(0.6) # 略微减少滚动间隙，但保持平滑感
-                print("已完成模拟滚动浏览。")
+                pyperclip.copy(image_to_upload_abs_path) # 复制路径到剪贴板
+                print("路径已复制到剪贴板。")
+                time.sleep(0.5) # 短暂等待剪贴板操作完成
 
+                pyautogui.hotkey('ctrl', 'v') # 模拟粘贴
+                print("已模拟粘贴 (Ctrl+V)。")
+                time.sleep(1.0) # 允许路径在对话框中显示和注册
+                
+                print(f"正在查找并点击'打开'按钮模板: '{DIALOG_OPEN_BUTTON_TEMPLATE_PATH}'...")
+                confidence_level_dialog_open = 0.8 # 可调整的置信度
+                open_button_coords = pyautogui.locateCenterOnScreen(DIALOG_OPEN_BUTTON_TEMPLATE_PATH, confidence=confidence_level_dialog_open)
+                
+                if open_button_coords:
+                    print(f"找到'打开'按钮: {open_button_coords}")
+                    pyautogui.moveTo(open_button_coords[0], open_button_coords[1], duration=0.25)
+                    pyautogui.click(open_button_coords[0], open_button_coords[1])
+                    print("已点击'打开'按钮。")
+                    file_selected_successfully = True
+                else:
+                    print(f"未能通过模板找到'打开'按钮。尝试模拟按 Enter 键作为后备方案...")
+                    # Fallback to pressing Enter if open button template not found
+                    time.sleep(0.5)
+                    pyautogui.press('enter')
+                    print("已尝试模拟按 Enter 键。")
+                    # We can't be sure if Enter worked, so we don't set file_selected_successfully to True here
+                    # unless we have a way to verify. For now, we assume it might have worked if button wasn't found.
+                    # This part needs careful observation.
+                    print("请观察文件是否开始上传。如果失败，主要问题可能在于'打开'按钮的模板或定位。")
+                    file_selected_successfully = True # Temporarily assume it works for now to proceed
+
+                if file_selected_successfully: # Check if either button click or Enter (assumed) worked
+                    print("等待图片上传和页面跳转 (约10秒)... 请观察浏览器。")
+                    time.sleep(10) 
+                    print("\n--- 步骤 4: 模拟浏览搜索结果页面 --- ")
+                    print("图片已上传，结果页面应已加载。现在模拟向下滚动浏览。")
+                    scroll_amount = -500  # 增加每次滚动幅度
+                    scroll_iterations = 5 # 增加滚动次数
+                    for i in range(scroll_iterations):
+                        pyautogui.scroll(scroll_amount)
+                        print(f"已向下滚动 ({i+1}/{scroll_iterations})")
+                        time.sleep(0.6) # 略微减少滚动间隙，但保持平滑感
+                    print("已完成模拟滚动浏览。")
+
+        except pyautogui.ImageNotFoundException as e:
+             print(f"PyAutoGUI错误：在步骤3中找不到模板: {e}") # More specific error
         except Exception as e:
-            print(f"文件上传或模拟浏览步骤错误: {e}")
+            print(f"在处理文件上传步骤中发生错误: {e}")
             
     else:
         if camera_clicked_successfully: # 只有在相机点击成功但上传按钮失败时才显示此消息
