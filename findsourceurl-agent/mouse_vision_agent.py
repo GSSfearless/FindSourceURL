@@ -131,40 +131,33 @@ def extract_coordinates(text):
     return None
 
 if __name__ == "__main__":
-    # --- 自动打开浏览器并导航 --- 
     google_images_url = "https://images.google.com/"
     print(f"正在尝试自动打开浏览器并导航到: {google_images_url}")
     webbrowser.open_new_tab(google_images_url)
-    print("已发送打开网页的指令。请等待页面加载（约5-7秒）。") # 缩短等待
-    print("重要提示：请在页面加载后，手动确保浏览器窗口是活动且最大化的，以便后续的图像识别能准确工作。")
-    time.sleep(7) # 缩短浏览器初始加载等待
+    print("已发送打开网页的指令。请等待页面加载（约10-12秒）。") 
+    print("重要提示：请在页面加载后，手动确保浏览器窗口是活动且最大化的...")
+    time.sleep(12) # 增加浏览器初始加载等待
 
-    # --- 步骤 1: 使用图像模板定位并点击相机图标 --- 
-    print("\n--- 步骤 1: 使用图像模板定位并点击相机图标 --- ")
+    print("\n--- 步骤 1: 定位并点击相机图标 --- ")
     if not os.path.exists(CAMERA_ICON_TEMPLATE_PATH):
         print(f"错误：相机图标模板 '{CAMERA_ICON_TEMPLATE_PATH}' 未找到！")
         exit()
-
     camera_clicked_successfully = False
     try:
         print(f"查找相机图标模板: '{CAMERA_ICON_TEMPLATE_PATH}'...")
         confidence_level_camera = 0.8 
         camera_coords = pyautogui.locateCenterOnScreen(CAMERA_ICON_TEMPLATE_PATH, confidence=confidence_level_camera)
-        
         if camera_coords:
             print(f"找到相机图标: {camera_coords}")
-            # print(f"准备将鼠标移动到坐标 {camera_coords} 并点击 (0.5秒后执行)") # 可以简化提示
-            time.sleep(0.5) # 缩短等待
-            pyautogui.moveTo(camera_coords[0], camera_coords[1], duration=0.25) # 加快移动
+            time.sleep(1.5) # 增加第一次鼠标移动前的等待
+            pyautogui.moveTo(camera_coords[0], camera_coords[1], duration=0.25) 
             pyautogui.click(camera_coords[0], camera_coords[1])
             print("已点击相机图标。")
             camera_clicked_successfully = True
             print("等待'上传文件'对话框加载...")
-            time.sleep(1.5) # 缩短等待上传对话框
+            time.sleep(1.5) 
         else:
             print(f"未能通过模板找到相机图标 (confidence={confidence_level_camera})。")
-            # ... (fallback AI analysis can be kept or simplified) ...
-
     except pyautogui.ImageNotFoundException:
         print(f"错误：屏幕上找不到相机图标模板 '{CAMERA_ICON_TEMPLATE_PATH}'。")
     except Exception as e:
