@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright, Playwright, Page, Browser
+from playwright.async_api import async_playwright, Playwright, Page, Browser, TimeoutError as PlaywrightTimeoutError
 import os
 from dotenv import load_dotenv
 import traceback # For better error logging
@@ -10,23 +10,41 @@ import re # For regular expressions
 import json # For potentially parsing tool message content
 from typing import TypedDict, Annotated, List, Union, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage
+import logging # Ensure logging is imported
 
 # --- LangChain & LangGraph Imports ---
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.tools import tool
 from langchain.globals import set_debug
 from langgraph.graph import StateGraph, END # Import StateGraph and END
-# from langgraph.checkpoint.sqlite import SqliteSaver # <<< COMMENTED OUT this unused import
+# from langgraph.checkpoint.sqlite import SqliteSaver # <<< COMMENTED OUT this unused import - Now TRULY commenting out
 
 from bs4 import BeautifulSoup
+
+# Assuming setup_logging() is defined somewhere and initializes a logger instance
+# For example:
+# def setup_logging():
+#     l = logging.getLogger(__name__)
+#     # ... configure l ...
+#     return l
+# logger = setup_logging() 
+# OR, if logger is configured more directly:
+logger = logging.getLogger(__name__) # Default way to get a logger
+# Ensure your logging configuration (level, handlers) is set up appropriately for this logger.
+# If you have a global `setup_logging` function that does this, ensure it's called before nodes are run.
+
+# <<< ADDED TOP-LEVEL DEBUG PRINT >>>
+print("[DEBUG] agent_main.py script started")
+# <<< END ADDED SECTION >>>
 
 # Load environment variables from .env file
 load_dotenv()
 
 # --- Enable LangChain Debug Mode ---
-set_debug(True)
-print("[LangChain] Debug mode enabled.")
+set_debug(False)
+print("[LangChain] Debug mode disabled (set_debug(False)). Relying on custom prints.")
 
 # --- LLM Initialization ---
 try:
@@ -92,6 +110,70 @@ async def close_page_and_browser():
         await _playwright_instance.stop()
         _playwright_instance = None
         print("[Browser Manager] Playwright instance stopped.")
+
+# Helper function to filter screenshot from state for cleaner logging
+def filter_screenshot_from_state(state_dict: dict) -> dict:
+    if not isinstance(state_dict, dict):
+        # If it's not a dict (e.g., None or some other type passed by mistake), return it as is.
+        # This can happen if a node returns something unexpected.
+        logger.debug(f"[Filter State] Input was not a dict, returning as is: {type(state_dict)}")
+        return state_dict 
+    filtered_state = state_dict.copy()
+    if "screenshot" in filtered_state and filtered_state["screenshot"]:
+        if isinstance(filtered_state["screenshot"], str):
+            # Limit the logged length to avoid excessive log even for length calculation
+            screenshot_len_kb = len(filtered_state["screenshot"]) / 1024
+            if screenshot_len_kb > 100: # Only show actual length if it's somewhat reasonable
+                 filtered_state["screenshot"] = f"[...screenshot_base64_omitted (len: {screenshot_len_kb:.1f}KB)...]"
+            else:
+                 filtered_state["screenshot"] = f"[...screenshot_base64_omitted (len: {screenshot_len_kb:.1f}KB)...]"
+        else:
+            filtered_state["screenshot"] = "[...screenshot_base64_omitted (not a string format)...]"
+    return filtered_state
+
+# Helper function to capture current page state - MOVED AND MODIFIED
+async def _capture_current_page() -> dict:
+    """Captures current page URL, content, and screenshot. Handles errors."""
+    page = await get_page()
+    if not page or page.is_closed():
+        logger.error("[Capture Page] Page not available or closed.")
+        return {"current_url": None, "page_content": None, "screenshot": None, "error_message": "Page not available for capture."}
+    try:
+        logger.debug("[Capture Page] Getting URL, HTML content, and screenshot...")
+        url = page.url
+        # content = await page.content() # Full content can be very large
+
+        # Simplified text extraction
+        text_content = await page.evaluate("document.body.innerText || \"\"") 
+        simplified_text = ' '.join(text_content.split()[:1000]) # Limit text length more generously for context
+        logger.debug(f"[Capture Page] Extracted text (limited): {simplified_text[:100]}...")
+
+        screenshot_bytes = await page.screenshot()
+        screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+        
+        debug_screenshot_path = "debug_captured_page.png" # Generic name
+        try:
+            with open(debug_screenshot_path, "wb") as f:
+                f.write(screenshot_bytes)
+            logger.info(f"[Capture Page] Debug screenshot saved to: {debug_screenshot_path}")
+        except Exception as e_ss_save:
+            logger.warning(f"[Capture Page] Could not save debug screenshot: {e_ss_save}")
+
+        return {
+            "current_url": url,
+            "page_content": simplified_text, 
+            "screenshot": screenshot_b64,
+            "error_message": None
+        }
+    except Exception as e:
+        logger.error(f"[Capture Page] Error capturing page state: {e}")
+        current_url_on_error = "Error_fetching_url"
+        try:
+            if page and not page.is_closed():
+                 current_url_on_error = page.url
+        except: # Broad except as a last resort for URL
+            pass
+        return {"current_url": current_url_on_error, "page_content": None, "screenshot": None, "error_message": f"Error capturing page: {e}"}
 
 # --- Tool Definitions (Keep the original tool functions for now) ---
 # We will call these functions from within our graph nodes.
@@ -257,52 +339,140 @@ async def _click_element_by_description_internal(description: str) -> str:
                 print(f"[Browser Tool - Click by Desc] Could not save screenshot on error: {ss_e}")
         return f"Error: Could not click element described as '{description}'. Details: {str(e)}"
 
-async def _upload_file_internal(selector: str, file_path: str) -> str:
-    print(f"\n[Internal Tool] _upload_file_internal(selector='{selector}', file_path='{file_path}')")
-    
-    if not os.path.isabs(file_path):
-        script_dir = os.path.dirname(__file__)
-        absolute_file_path = os.path.join(script_dir, file_path)
-    else:
-        absolute_file_path = file_path
-        
-    if not os.path.exists(absolute_file_path):
-         print(f"[Browser Tool - Upload] File not found at resolved path: {absolute_file_path}")
-         return f"Error: File not found at the specified path: {absolute_file_path}"
+async def _upload_file_internal(locator_or_text: str, file_path: str) -> dict:
+    """
+    Attempts to upload a file using a file input element found by various strategies.
+    After setting the file input, it captures the current page state.
+    """
+    page = await get_page()
+    if not page:
+        logger.error("[Browser Tool - Upload Internal] Page not available.")
+        return {
+            "upload_status": "Upload failed: Page not available.",
+            "current_url": None, "page_content": None, "screenshot": None,
+            "error_message": "Upload failed: Page not available."
+        }
+
+    if not os.path.exists(file_path):
+        logger.error(f"[Browser Tool - Upload Internal] File not found: {file_path}")
+        return {
+            "upload_status": f"Upload failed: File not found at {file_path}",
+            "current_url": page.url, "page_content": await page.content(), "screenshot": None,
+            "error_message": f"Upload failed: File not found at {file_path}"
+        }
+
+    error_message = "Upload failed: Could not find or interact with file input after multiple attempts."
+    upload_successful = False
+    file_input_el = None # Initialize file_input_el
 
     try:
-        page = await get_page()
-        if not page or page.is_closed():
-            return "Error: No active page available to upload file to. Use browse_web_page first."
+        # Common selectors for file input elements
+        file_input_selectors = [
+            "input[type='file']",
+            "//input[@type='file']", # XPath version
+            "form input[type='file']",
+            "div input[type='file']",
+            "[data-testid='file-input']", # Common test ID
+            "input[name='image']", # Common name
+            "input[name='file']"
+        ]
 
-        print(f"[Browser Tool - Upload] Attempting to upload file '{absolute_file_path}' to selector: {selector}")
-        element = page.locator(selector)
-        await element.wait_for(state='visible', timeout=15000) 
-        await element.set_input_files(absolute_file_path, timeout=20000)
-        print(f"[Browser Tool - Upload] Successfully set input files for selector: {selector}")
-        await page.wait_for_timeout(3000)
-        return f"Successfully initiated upload of file '{os.path.basename(absolute_file_path)}' to element '{selector}'. The page may have changed."
-    except Exception as e:
-        error_message = f"Error uploading file to {selector}: {str(e)}\n{traceback.format_exc()}"
-        print(f"[Browser Tool - Upload] {error_message}")
-        if '_page_instance' in globals() and _page_instance and not _page_instance.is_closed():
+        logger.info(f"[Browser Tool - Upload Internal] Waiting for a file input element to become available...")
+
+        for i, selector in enumerate(file_input_selectors):
+            logger.debug(f"[Browser Tool - Upload Internal] Trying file input selector #{i+1}: {selector}")
             try:
-                await _page_instance.screenshot(path="error_screenshot_upload_failed.png")
-                print("[Browser Tool - Upload] Saved screenshot on error to error_screenshot_upload_failed.png")
-            except Exception as ss_e:
-                print(f"[Browser Tool - Upload] Could not save screenshot on error: {ss_e}")
-        return f"Error: Could not upload file '{os.path.basename(absolute_file_path)}' to selector '{selector}'. Details: {str(e)}"
+                await page.wait_for_selector(selector, state="attached", timeout=2000)
+                file_input_el = page.locator(selector).first
+                # --- CRITICAL FIX: Ensure NO await here ---
+                if file_input_el.is_attached():
+                     logger.info(f"[Browser Tool - Upload Internal] Found file input element with selector: {selector}")
+                     break
+                else:
+                     file_input_el = None # Reset if found but not attached
+            except PlaywrightTimeoutError:
+                logger.debug(f"[Browser Tool - Upload Internal] Selector {selector} not found or not attached quickly.")
+                file_input_el = None # Reset on timeout
+                continue
+            except Exception as e:
+                logger.warning(f"[Browser Tool - Upload Internal] Error checking selector {selector}: {e}")
+                file_input_el = None # Reset on other errors
+                continue
+
+        # Check if file_input_el was successfully found and is attached
+        # --- CRITICAL FIX: Ensure NO await here ---
+        if not file_input_el or not file_input_el.is_attached():
+            logger.error("[Browser Tool - Upload Internal] No file input element found or attached using common selectors.")
+            error_message = "Upload failed: No suitable file input element found on the page."
+        else:
+            # Log the outerHTML *before* trying to interact, helps debugging
+            try:
+                 outer_html = await file_input_el.evaluate('element => element.outerHTML')
+                 logger.info(f"[Browser Tool - Upload Internal] Using file input element: {outer_html}")
+            except Exception as eval_e:
+                 logger.warning(f"[Browser Tool - Upload Internal] Could not evaluate outerHTML for found input: {eval_e}")
+                 logger.info(f"[Browser Tool - Upload Internal] Using file input element found with selector, but could not get HTML.")
+
+            await file_input_el.set_input_files(file_path)
+            logger.info(f"[Browser Tool - Upload Internal] set_input_files(\'{file_path}\') called successfully.")
+            upload_successful = True
+            error_message = None # Clear error message as upload was successful
+
+    except PlaywrightTimeoutError as e: # Catch specific timeout errors if they bubble up
+        logger.error(f"[Browser Tool - Upload Internal] Timeout error during upload attempt: {e}")
+        error_message = f"Upload failed due to timeout: {e}"
+    except Exception as e:
+        logger.error(f"[Browser Tool - Upload Internal] General error during upload attempt: {e}\\n{traceback.format_exc()}") # Log traceback too
+        error_message = f"Upload failed: {e}"
+
+    # --- Return logic ---
+    if upload_successful:
+        await asyncio.sleep(2) # Give page a moment to react
+        logger.info("[Browser Tool - Upload Internal] Capturing page state after file selection...")
+        capture_data = await _capture_current_page() # Assumes _capture_current_page is defined globally
+        # Check if capture itself failed
+        if capture_data.get("error_message"):
+             logger.warning(f"[Browser Tool - Upload Internal] File selection successful, but failed to capture page state afterwards: {capture_data['error_message']}")
+             # Return success for upload, but with capture error details
+             return {
+                 "upload_status": "File selected, but page state capture failed.",
+                 "current_url": capture_data.get("current_url"), # May be None or stale
+                 "page_content": None,
+                 "screenshot": None,
+                 "error_message": capture_data["error_message"] # Propagate capture error
+             }
+        else:
+             # Happy path: Upload and capture successful
+             return {
+                 "upload_status": "File selected. Page state captured for next step analysis.",
+                 "current_url": capture_data.get("current_url"),
+                 "page_content": capture_data.get("page_content"),
+                 "screenshot": capture_data.get("screenshot"),
+                 "error_message": None
+             }
+    else:
+        # Upload failed, attempt to capture page state for debugging
+        logger.info("[Browser Tool - Upload Internal] Upload failed. Capturing current page state for debugging...")
+        current_page_state = await _capture_current_page()
+        # Log the state capture result along with the original upload error
+        logger.debug(f"[Browser Tool - Upload Internal] State capture after failed upload result: {filter_screenshot_from_state(current_page_state)}")
+        return {
+            "upload_status": "Upload failed.",
+            "current_url": current_page_state.get("current_url", page.url if page and not page.is_closed() else None),
+            "page_content": current_page_state.get("page_content"),
+            "screenshot": current_page_state.get("screenshot"),
+            "error_message": error_message # The original error from the upload attempt
+        }
 
 # --- LangGraph State Definition ---
 class AgentState(TypedDict):
-    task: str                 # The initial task description
-    image_path: str           # Path to the user's image
-    current_url: Optional[str] # The current URL the browser is on
-    page_content: Optional[str] # Simplified text content of the current page
-    screenshot: Optional[str] # Base64 encoded screenshot of the current page
-    analysis_result: Optional[str] # Result from LLM analysis (e.g., description, selector, final urls)
-    error_message: Optional[str] # Any error encountered
-    # We might add fields like 'found_urls' later
+    task: str
+    image_path: str
+    current_url: str
+    page_content: str
+    screenshot: str
+    error_message: str | None
+    analysis_result: str
 
 # --- LangGraph Nodes Definitions ---
 
@@ -320,6 +490,7 @@ async def start_browse_node(state: AgentState) -> AgentState:
         state["page_content"] = browse_result.get("text_content")
         state["screenshot"] = browse_result.get("screenshot_base64")
         state["error_message"] = None # Clear previous errors
+
     return state
 
 # --- Placeholder Nodes (to be implemented) ---
@@ -469,130 +640,182 @@ async def upload_browse_node(state: AgentState) -> AgentState:
              current_url_on_error = _page_instance.url
         state["current_url"] = current_url_on_error
         state["page_content"] = None
-        state["screenshot"] = None
+        state["screenshot"] = None # Ensure screenshot is None on error
         
     return state
 
 async def analyze_upload_dialog_node(state: AgentState) -> AgentState:
-    """Node to call LLM to analyze screenshot and text to find the upload file button/link selector."""
+    """Node to analyze the screenshot of the upload dialog and find the upload element selector."""
     print("--- Executing Node: analyze_upload_dialog ---")
-    
-    screenshot_b64 = state.get("screenshot")
-    text_content = state.get("page_content", "")
-
-    if not screenshot_b64:
-        print("Error: No screenshot available for upload dialog analysis.")
-        state["error_message"] = "No screenshot available for upload dialog analysis."
-        state["analysis_result"] = "Upload element selector not found"
+    page = await get_page()
+    if not page or page.is_closed():
+        state["error_message"] = "Error: Page instance not available for upload dialog analysis."
+        state["analysis_result"] = "Error: Missing input for analysis."
         return state
 
-    # Prompt for LLM to find the upload file element
-    # The user shared a screenshot showing "上传文件" (shàngchuán wénjiàn - upload file) as a link.
-    # We need to guide the LLM to find a clickable element for file upload.
+    text_content = state.get("page_content")
+    screenshot_b64 = state.get("screenshot")
+    current_url = state.get("current_url") # For context
+
+    if not text_content or not screenshot_b64:
+        state["error_message"] = "Error: Missing page content or screenshot for upload dialog analysis."
+        state["analysis_result"] = "Error: Missing input for analysis."
+        return state
+
+    # <<< MODIFIED SYSTEM AND HUMAN PROMPT BELOW >>>
     vision_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an expert visual analysis assistant. Your task is to analyze the provided screenshot and text from a webpage that shows a dialog for uploading an image for a reverse image search. "
-                   "Your goal is to locate the clickable element (like a button or a link) that allows the user to select a file to upload from their computer."),
+        ("system", "You are an expert visual analysis assistant focused on web automation. "
+                   "The user has already clicked a 'search by image' (camera) icon, and the screenshot you are seeing shows the MODAL DIALOG that appeared for uploading an image. "
+                   "Your ONLY task is to analyze the elements WITHIN THIS MODAL DIALOG. IGNORE any background elements like search bars or other icons that are NOT part of this dialog. "
+                   "Inside this dialog, find the clickable element (e.g., a link, a button, or an area that looks like an <input type=\"file\">) that allows the user to SELECT A FILE from their computer to upload. "
+                   "Do NOT look for a search button or an image paste area. Focus on the file SELECTION/UPLOAD element."),
         ("human", [
-            {"type": "text", "text": f"""Here is the relevant text from the page dialog (it might be in Chinese or English):
+            {"type": "text", "text": f"""Here is the relevant text from the page dialog (URL: {current_url}):
 ```
 {text_content[:1000]}...```
 
-"""
-                                      "Now, look carefully at this screenshot of the dialog:"},
+Screenshot of the UPLOAD DIALOG (focus ONLY on this dialog):
+It should contain options like 'upload a file', 'select file', '粘贴图片网址', '或上传文件'."""},
             {
                 "type": "image_url",
                 "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}
             },
-            {"type": "text", "text": "\n\nBased on the screenshot and text, identify the clickable element (e.g., a link or button) that a user would click to UPLOAD A FILE from their computer. "
-                                      "The text for this element might be '上传文件', 'upload file', 'select file', 'browse', or similar. It might be an `<input type=\'file\'>` element, or a `<span>` or `<a>` tag styled as a button. "
-                                      "Respond with a plausible CSS selector for this element (e.g., `input[type=\'file']`, `span.upload-button`, `a[href=\'#upload']`). "
-                                      "If you can confidently determine a selector, provide ONLY the selector. "
-                                      "If you cannot determine a specific CSS selector but can describe it visually (e.g., 'The blue button labeled Upload'), provide that description. "
-                                      "If you cannot find any such element, respond ONLY with 'Upload element selector not found'."}
+            {"type": "text", "text": "\n\nBased on the screenshot and text of the MODAL DIALOG, what is the most appropriate and robust CSS selector for the file UPLOAD link/button (e.g., `a.upload-link`, `button[aria-label='Upload file']`, `input[type='file']`)? "
+                                      "If you can identify it clearly, provide ONLY the CSS selector string. "
+                                      "If you are less certain about a CSS selector but can identify the exact text of the element (e.g., '上传文件' or 'upload a file'), provide ONLY that exact text string. "
+                                      "If you cannot find a suitable element for file upload within the dialog, respond with 'File upload element not found in dialog'."}
         ])
     ])
-    
-    chain = vision_prompt | llm
+    # <<< END MODIFIED PROMPT >>>
+
+    print("[Analyze Upload Dialog Node] Sending request to LLM for vision analysis of the upload dialog...")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, max_tokens=250) # Correctly initialize LLM
+    chain = vision_prompt | llm | StrOutputParser()
     
     try:
-        print("Invoking LLM for upload dialog analysis...")
-        response = await chain.ainvoke({})
-        analysis = response.content.strip()
-        print(f"LLM Upload Dialog Analysis Result: {analysis}")
-        
-        state["analysis_result"] = analysis # This could be a selector, a description, or "not found"
-        state["error_message"] = None
-            
+        analysis_result = await chain.ainvoke({})
+        state["analysis_result"] = analysis_result
+        state["error_message"] = None # Clear previous errors
+        print(f"[Analyze Upload Dialog Node] LLM Analysis Result:\n{analysis_result}")
     except Exception as e:
-        print(f"Error during LLM upload dialog analysis: {e}")
-        print(traceback.format_exc())
-        state["error_message"] = f"LLM upload dialog analysis failed: {e}"
-        state["analysis_result"] = "Upload element selector not found"
-
+        print(f"[Analyze Upload Dialog Node] Error during LLM invocation: {e}")
+        state["error_message"] = f"LLM analysis of upload dialog failed: {e}"
+        state["analysis_result"] = "Error: LLM analysis of upload dialog failed."
+        
     return state
 
 async def perform_upload_node(state: AgentState) -> AgentState:
-    """Node to perform the file upload using a selector or description."""
-    print("--- Executing Node: perform_upload ---")
-    
-    target_selector_or_description = state.get("analysis_result")
-    image_to_upload = state.get("image_path")
+    logger.info("--- Executing Node: perform_upload ---")
+    image_path = state.get("image_path")
+    # analysis_result here is the locator/text for the "upload file" button/link itself
+    upload_trigger_element_description = state.get("analysis_result", "").strip().strip("'\"")
 
-    if not target_selector_or_description or target_selector_or_description == "Upload element selector not found":
-        error_msg = "No selector or description provided for file upload."
-        print(error_msg)
-        state["error_message"] = error_msg
+    if not image_path:
+        logger.error("[Perform Upload Node] Image path not found in state.")
+        state["error_message"] = "Cannot perform upload: Image path missing."
+        return state
+    
+    if not upload_trigger_element_description:
+        logger.error("[Perform Upload Node] Upload trigger element description not found in state.")
+        state["error_message"] = "Cannot perform upload: Upload trigger element description missing."
         return state
 
-    if not image_to_upload or not os.path.exists(image_to_upload):
-        error_msg = f"Image path invalid or file not found: {image_to_upload}"
-        print(error_msg)
-        state["error_message"] = error_msg
-        return state
-
-    # We should refine the prompt for `analyze_upload_dialog_node` to strongly prefer selectors.
+    logger.info(f"[Perform Upload Node] Cleaned analysis result for upload element: '{upload_trigger_element_description}'")
     
-    # <<< MODIFIED: Handle potential backticks from LLM and refine selector check >>>
-    cleaned_analysis_result = target_selector_or_description.strip()
-    if cleaned_analysis_result.startswith("`") and cleaned_analysis_result.endswith("`"):
-        cleaned_analysis_result = cleaned_analysis_result[1:-1]
+    upload_result_dict = await _upload_file_internal(
+        locator_or_text=upload_trigger_element_description, # This is what LLM found for the upload dialog trigger
+        file_path=image_path
+    )
 
-    # More robust check for what might be a CSS selector vs. a natural language description.
-    # Simple selectors usually don't have many spaces unless they are part of an attribute value string.
-    # Descriptions usually have multiple words separated by spaces.
-    # This is still a heuristic.
-    is_likely_selector = False
-    if cleaned_analysis_result and (" " not in cleaned_analysis_result or "[" in cleaned_analysis_result): # Basic check: no space OR space is within attribute selector
-        # Further check: does it look like a common selector pattern?
-        if re.match(r"^[\.#]?[a-zA-Z0-9_\-]+.*$", cleaned_analysis_result) or \
-           re.match(r"^[a-zA-Z0-9_\-]+\[.*\]+.*$", cleaned_analysis_result) or \
-           re.match(r"^input|^a|^button|^span|^div|^li", cleaned_analysis_result, re.IGNORECASE): # Starts with common tags
-            is_likely_selector = True
+    state["current_url"] = upload_result_dict.get("current_url", state.get("current_url"))
+    state["page_content"] = upload_result_dict.get("page_content", state.get("page_content"))
+    state["screenshot"] = upload_result_dict.get("screenshot", state.get("screenshot"))
+    state["error_message"] = upload_result_dict.get("error_message")
     
-    print(f"[Perform Upload Node] Cleaned analysis result: '{cleaned_analysis_result}', Is likely selector: {is_likely_selector}")
+    # Clear previous analysis_result (which was for upload trigger)
+    # The next node (analyze_post_upload_page_node) will populate it with submit button analysis.
+    state["analysis_result"] = "" 
 
-    if is_likely_selector:
-        upload_result = await _upload_file_internal(selector=cleaned_analysis_result, file_path=image_to_upload)
-        if "Error" in upload_result:
-            print(f"Error during file upload: {upload_result}")
-            state["error_message"] = upload_result
-        else:
-            print(f"File upload initiated: {upload_result}")
-            state["error_message"] = None
-            # We need to browse again to see the results page
-            state["analysis_result"] = "File upload initiated. Need to browse results." 
+    if upload_result_dict.get("error_message"):
+        logger.error(f"[Perform Upload Node] Upload failed: {upload_result_dict.get('error_message')}")
     else:
-        # Here we would handle a description, perhaps by calling a new tool similar to 
-        # _click_element_by_description_internal but for finding an upload input.
-        # For now, we treat this as an error / unsupported path.
-        error_msg = f"Upload target is a description, not a direct selector. This path is not yet fully implemented: {target_selector_or_description}"
-        print(error_msg)
-        state["error_message"] = error_msg
-        state["analysis_result"] = "Upload failed: target was a description."
-
-    return state
+        logger.info(f"[Perform Upload Node] Upload status: {upload_result_dict.get('upload_status')}")
+        logger.info(f"[Perform Upload Node] Page state captured for submit button analysis. URL: {state['current_url']}")
     
-# ... other nodes like analyze_upload_dialog, perform_upload, browse_results, analyze_results will follow ...
+    logger.debug(f"[DEBUG perform_upload_node END] Final state before return: {filter_screenshot_from_state(state.copy())}")
+    return state
+
+async def browse_results_node(state: AgentState) -> AgentState:
+    """Node to capture the content of the results page *without* navigating."""
+    logger.info("--- Executing Node: browse_results ---")
+    current_url = state.get("current_url")
+    if not current_url:
+        state["error_message"] = "Error: current_url not found in state before browsing results."
+        return state
+    
+    logger.info(f"[Browse Results Node] Capturing content from current URL: {current_url}")
+    
+    # Now calls the global _capture_current_page
+    capture_result = await _capture_current_page()
+
+    if capture_result.get("error_message"):
+        state["error_message"] = f"Error browsing results: {capture_result['error_message']}"
+    elif capture_result.get("error"):
+        state["error_message"] = f"Error browsing results: {capture_result['error']}"
+    else:
+        state["page_content"] = capture_result.get("page_content")
+        state["screenshot"] = capture_result.get("screenshot")
+        state["current_url"] = capture_result.get("current_url") # Update URL just in case
+        state["error_message"] = None # Clear previous errors if browse is successful
+        logger.info("[Browse Results Node] Successfully captured results page content and screenshot.")
+        
+    return state
+
+async def analyze_results_node(state: AgentState) -> AgentState:
+    """Node to analyze the results page screenshot and text to extract source URLs."""
+    print("--- Executing Node: analyze_results ---")
+    # <<< ADDED DEBUG PRINT >>>
+    print("[DEBUG] Entering analyze_results_node")
+    page_content = state.get("page_content")
+    screenshot_b64 = state.get("screenshot")
+    current_url = state.get("current_url") # For context
+
+    if not page_content or not screenshot_b64:
+        state["error_message"] = "Error: Missing page content or screenshot for results analysis."
+        state["analysis_result"] = "Error: Missing input for results analysis."
+        return state
+
+    analysis_prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an expert visual analysis assistant. Your task is to analyze the provided screenshot and text from a Google Lens search results page. "
+                   "Focus on the section titled '包含匹配图片的页面' (Pages that include matching images). "
+                   "Extract all the source URLs listed under that section. "
+                   "Format your response clearly, starting with 'Visually similar images found.', then mentioning the section title found, and finally listing the extracted URLs under 'Found URLs:'."),
+        ("human", [
+            {"type": "text", "text": f"""Relevant text from the results page (URL: {current_url}):
+```
+{page_content[:1000]}...```
+
+Screenshot of the results page:"""},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
+            {"type": "text", "text": "\n\nPlease analyze the screenshot and text, specifically find the section '包含匹配图片的页面' and list all the source URLs shown under it."}
+        ])
+    ])
+    
+    print("[Analyze Results Node] Invoking LLM for results analysis...")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0, max_tokens=1000)
+    chain = analysis_prompt | llm | StrOutputParser()
+    
+    try:
+        analysis_result = await chain.ainvoke({})
+        state["analysis_result"] = analysis_result
+        state["error_message"] = None
+        print(f"[Analyze Results Node] LLM Analysis Result:\n{analysis_result}")
+    except Exception as e:
+        print(f"[Analyze Results Node] Error during LLM invocation: {e}")
+        state["error_message"] = f"LLM analysis failed: {e}"
+        state["analysis_result"] = "Error: LLM analysis failed."
+        
+    return state
 
 # --- LangGraph Conditional Edges --- 
 
@@ -627,47 +850,81 @@ def should_browse_for_upload_or_end(state: AgentState) -> str:
         return "capture_upload_dialog_page" # New transition name
 
 def should_perform_upload_or_end(state: AgentState) -> str:
-    """Determines next step after analyzing the upload dialog page."""
+    """Conditional edge deciding whether to upload or end."""
     print("--- Evaluating Edge: should_perform_upload_or_end ---")
     analysis_result = state.get("analysis_result")
-    error = state.get("error_message")
+    error_message = state.get("error_message") # Check for errors from previous node too
 
-    if error:
-        print(f"Decision: Error during upload dialog analysis -> End ({error})")
-        return "end_error"
-    
-    if analysis_result == "Upload element selector not found":
-        print("Decision: Upload element selector not found -> End")
-        return "end_not_found"
-    
-    # Basic check if it might be a selector vs a description
-    # A more robust check or a different state field might be needed here.
-    # For now, if it's not "not found" and no error, assume we try to upload.
-    if analysis_result:
-        print(f"Decision: Upload element selector/description found ({analysis_result}) -> Perform Upload")
+    if error_message and "Error:" in error_message:
+         print(f"Decision: Error found ('{error_message}'). Ending graph.")
+         return "__end__"
+         
+    if not analysis_result or "not found" in analysis_result.lower() or "error" in analysis_result.lower():
+        print(f"Decision: No valid analysis result ('{analysis_result}'). Ending graph.")
+        return "__end__"
+
+    # <<< MODIFIED: Heuristic to accept short text as potential locators >>>
+    cleaned_result = analysis_result.strip()
+    if cleaned_result.startswith("`") and cleaned_result.endswith("`"):
+        cleaned_result = cleaned_result[1:-1].strip()
+        
+    # Consider it a likely locator if it's not clearly a long description
+    # Heuristic: Fewer than 4 words AND does not contain 'icon' (which was our previous failure mode)
+    word_count = len(cleaned_result.split())
+    is_likely_locator = bool(cleaned_result) and word_count < 4 and "icon" not in cleaned_result.lower()
+
+    if is_likely_locator:
+        print(f"Decision: Analysis result ('{analysis_result}') looks like a locator/text (heuristic: <4 words, no 'icon'). Proceeding to upload.")
         return "perform_upload"
     else:
-        print("Decision: Upload dialog analysis failed (empty result) -> End Error")
-        state["error_message"] = "Upload dialog analysis result was empty."
-        return "end_error"
+        # If it doesn't look like a selector/short text, assume it's a description or error
+        print(f"Decision: Analysis result ('{analysis_result}') does not look like a locator/text (heuristic failed). Ending graph.")
+        # We could potentially add a node here to ASK the user for the selector if we get a description
+        return "__end__" # End for now if it's descriptive
 
 def should_browse_results_or_end(state: AgentState) -> str:
-    """Determines next step after attempting file upload."""
+    """Determines whether to browse results page or end after upload attempt."""
     print("--- Evaluating Edge: should_browse_results_or_end ---")
+    # <<< ADDED DEBUG PRINT >>>
+    print(f"[DEBUG Edge should_browse_results_or_end START] Incoming state: {state}")
+    print(f"[DEBUG Edge] Current error_message in state: {state.get('error_message')!r}")
+    print(f"[DEBUG Edge] Current upload_result in state: {state.get('upload_result')!r}")
+    # <<< END ADDED DEBUG PRINTS >>>
+    upload_result = state.get("upload_result") # Check upload_result now
     error = state.get("error_message")
-    analysis_result = state.get("analysis_result")
 
-    if error:
-        print(f"Decision: Error during upload -> End ({error})")
+    # Prioritize explicit errors from the state
+    if error and "Error:" in error:
+        print(f"Decision: Error state detected -> End ({error})")
         return "end_error"
-    
-    if analysis_result == "File upload initiated. Need to browse results.":
-        print("Decision: Upload initiated -> Browse for results (currently END)")
-        # Later, this will go to a new browse_results_node
-        return "end_temp_after_upload" # Temporarily end here
+        
+    # Check if upload_result indicates success
+    if upload_result and "successfully" in upload_result.lower():
+        print(f"Decision: Upload successful ('{upload_result}') -> Browse Results")
+        return "browse_results" # Go to the new node
     else:
-        print(f"Decision: Upload status unexpected ({analysis_result}) -> End Error")
-        state["error_message"] = f"Unexpected status after upload: {analysis_result}"
+        print(f"Decision: Upload failed or status unclear ('{upload_result}') -> End Error")
+        # Ensure error message reflects this if not already set
+        if not error:
+             state["error_message"] = f"Upload failed or status unclear: {upload_result}"
+        return "end_error"
+
+def should_return_results_or_end(state: AgentState) -> str:
+    """Determines whether to end successfully with results or end with an error after analysis."""
+    print("--- Evaluating Edge: should_return_results_or_end ---")
+    analysis_result = state.get("analysis_result")
+    error = state.get("error_message")
+
+    if error and "Error:" in error: # Check for errors during analysis first
+        print(f"Decision: Error during results analysis -> End ({error})")
+        return "end_error"
+        
+    if analysis_result and "Found URLs:" in analysis_result:
+        print(f"Decision: Found URLs in analysis result -> End Success")
+        return "end_success"
+    else:
+        print(f"Decision: Analysis result does not contain URLs or is missing ('{analysis_result}') -> End Error")
+        state["error_message"] = f"Failed to extract URLs from results page. Analysis: {analysis_result}"
         return "end_error"
 
 # --- Build the Graph --- 
@@ -678,10 +935,11 @@ workflow = StateGraph(AgentState)
 workflow.add_node("start_browse", start_browse_node)
 workflow.add_node("analyze_vision", analyze_vision_node) 
 workflow.add_node("click", click_node) 
-workflow.add_node("capture_upload_dialog_page", upload_browse_node) # Renamed upload_browse_node for clarity
-workflow.add_node("analyze_upload_dialog", analyze_upload_dialog_node) # New node
-workflow.add_node("perform_upload", perform_upload_node) # New node
-# ... add other nodes later ...
+workflow.add_node("capture_upload_dialog_page", upload_browse_node)
+workflow.add_node("analyze_upload_dialog", analyze_upload_dialog_node)
+workflow.add_node("perform_upload", perform_upload_node)
+workflow.add_node("browse_results", browse_results_node)
+workflow.add_node("analyze_results", analyze_results_node)
 
 # Define the edges
 workflow.set_entry_point("start_browse")
@@ -703,7 +961,7 @@ workflow.add_conditional_edges(
     "click",
     should_browse_for_upload_or_end,
     {
-        "capture_upload_dialog_page": "capture_upload_dialog_page", # Connects to the renamed upload_browse_node
+        "capture_upload_dialog_page": "capture_upload_dialog_page", 
         "end_error": END 
     }
 )
@@ -725,16 +983,28 @@ workflow.add_conditional_edges(
 # Conditional edge after perform_upload node
 workflow.add_conditional_edges(
     "perform_upload",
-    should_browse_results_or_end,
+    should_browse_results_or_end, # Use corrected function
     {
-        "end_temp_after_upload": END, # Temporarily end here, will be browse_results_node
+        "browse_results": "browse_results", # Go to browse_results on success
         "end_error": END
     }
 )
 
+# <<< ADDED Edge from browsing results to analyzing results >>>
+workflow.add_edge("browse_results", "analyze_results")
+
+# <<< ADDED Conditional edge after analyzing results >>>
+workflow.add_conditional_edges(
+    "analyze_results",
+    should_return_results_or_end,
+    {
+        "end_success": END, # End successfully if URLs are found
+        "end_error": END  # End with error if URLs are not found
+    }
+)
+
 # Compile the graph
-# memory = SqliteSaver.from_conn_string(":memory:") # Example in-memory checkpointing
-app = workflow.compile() # checkpointer=memory)
+app = workflow.compile()
 
 # --- Main Execution (Using LangGraph) ---
 async def run_graph(task: str, image_path: str):
@@ -743,6 +1013,7 @@ async def run_graph(task: str, image_path: str):
     config = {"configurable": {"thread_id": "user-session-1"}}
     initial_state = AgentState(task=task, image_path=image_path)
     
+    final_state = None # Initialize final_state
     try:
         # Stream events to see the flow
         async for event in app.astream_events(initial_state, config=config, version="v1"):
@@ -752,34 +1023,99 @@ async def run_graph(task: str, image_path: str):
             if kind == "on_chain_start":
                 print(f"\nStarting step: {node_name}")
             elif kind == "on_chain_end":
-                # <<< STRICT OMISSION: Never print direct output for on_chain_end >>>
-                print(f"Finished step: {node_name} (Output details omitted)") 
+                # <<< MODIFIED: Check and replace screenshot in output before printing >>>
+                output_data = event['data'].get('output')
+                log_output = "Unknown/NotDict" # Default log value
+                if isinstance(output_data, dict):
+                    # Create a copy to modify for logging
+                    log_output = output_data.copy()
+                    if "screenshot" in log_output and isinstance(log_output.get("screenshot"), str) and len(log_output.get("screenshot", "")) > 200:
+                        log_output["screenshot"] = "[... base64 screenshot omitted by logger ...]"
+                    # Also check for the other key used in browse internal tool
+                    if "screenshot_base64" in log_output and isinstance(log_output.get("screenshot_base64"), str) and len(log_output.get("screenshot_base64", "")) > 200:
+                         log_output["screenshot_base64"] = "[... base64 screenshot_base64 omitted by logger ...]"
+                elif output_data is not None:
+                     log_output = str(output_data) # Handle non-dict outputs
+                
+                print(f"Finished step: {node_name} [Output: {log_output}]") 
+                # <<< END MODIFIED SECTION >>>
             elif kind == "on_tool_start":
                  # Ensure input is truncated if potentially large
                  tool_input = str(event['data'].get('input'))
-                 print(f"  Tool Start: {node_name} (Input: {tool_input[:100]}{'...' if len(tool_input) > 100 else ''})") 
+                 print(f"  Tool Start: {node_name} [Input: {tool_input[:100]}{'...' if len(tool_input) > 100 else ''}]") 
             elif kind == "on_tool_end":
                  # <<< STRICT OMISSION: Always summarize or truncate tool output >>>
                  tool_output = event['data'].get('output')
                  output_summary = ""
-                 if isinstance(tool_output, dict) and "screenshot_base64" in tool_output:
-                      # Specific summary for browse tool
-                      output_summary = f"text_len={len(tool_output.get('text_content', ''))}, screenshot: {'Yes' if tool_output.get('screenshot_base64') else 'No'}"
+                 if isinstance(tool_output, dict):
+                      # Check both potential keys for screenshot data
+                      text_content_len = len(tool_output.get('text_content', ''))
+                      ss_omitted = False
+                      if tool_output.get('screenshot') and isinstance(tool_output.get('screenshot'), str) and len(tool_output.get('screenshot', '')) > 200:
+                           output_summary = f"text_len={text_content_len}, screenshot: [omitted in tool_end summary]"
+                           ss_omitted = True
+                      elif tool_output.get('screenshot_base64') and isinstance(tool_output.get('screenshot_base64'), str) and len(tool_output.get('screenshot_base64', '')) > 200:
+                           output_summary = f"text_len={text_content_len}, screenshot_base64: [omitted in tool_end summary]"
+                           ss_omitted = True
+                      # Handle cases where screenshot might already be omitted string or None/empty
+                      if not ss_omitted:
+                          ss_val = tool_output.get('screenshot', tool_output.get('screenshot_base64'))
+                          if isinstance(ss_val, str) and ss_val.startswith("[... base64"):
+                               output_summary = f"text_len={text_content_len}, screenshot: [already omitted]"
+                          else:
+                               output_summary = f"text_len={text_content_len}, screenshot: No/Empty"
                  elif tool_output is not None:
                       # Generic truncation for other outputs
                       output_str = str(tool_output)
                       output_summary = f"{output_str[:80]}{'...' if len(output_str) > 80 else ''}"
                  else:
                       output_summary = "None"
-                 print(f"  Tool End: {node_name} (Output Summary: {output_summary})")
+                 print(f"  Tool End: {node_name} [Output Summary: {output_summary}]")
                  
+            # Keep track of the latest state snapshot if needed for final output
+            # (Alternative: call get_state after the loop)
+            if event["event"] == "on_chain_end": 
+                 current_output = event['data'].get('output')
+                 if isinstance(current_output, dict): # Nodes usually return the state
+                     final_state = current_output # Store the latest state output
+
+        # <<< ADDED: Print final result after the loop >>>
+        print("\n--- Graph Execution Complete --- ")
+        # Try getting the final state explicitly
+        try:
+            final_state_explicit = await app.aget_state(config)
+            # The state object might have a 'values' attribute or be the dict directly
+            final_state_values = getattr(final_state_explicit, 'values', final_state_explicit)
+            if isinstance(final_state_values, dict):
+                final_result = final_state_values.get('analysis_result')
+                error_msg = final_state_values.get('error_message')
+                print("\n>>> Final Analysis Result:")
+                print(final_result if final_result else "No analysis result found in final state.")
+                if error_msg:
+                    print(f"Final Error Message: {error_msg}")
+            else:
+                 print("Could not extract final state values as dictionary.")
+        except Exception as e_get_state:
+            print(f"Error getting final state explicitly: {e_get_state}")
+            # Fallback to the last state captured during streaming if explicit get fails
+            if final_state and isinstance(final_state, dict):
+                 print("\n>>> Final Analysis Result (from last streamed state):")
+                 final_result_streamed = final_state.get('analysis_result')
+                 error_msg_streamed = final_state.get('error_message')
+                 print(final_result_streamed if final_result_streamed else "No analysis result found in last streamed state.")
+                 if error_msg_streamed:
+                    print(f"Final Error Message (from last streamed state): {error_msg_streamed}")
+            else:
+                 print("Could not retrieve final analysis result.")
+        # <<< END ADDED SECTION >>>
+
     except Exception as e:
         print(f"\n--- Graph Invocation Error ---")
         print(f"{type(e).__name__}: {e}")
         print(traceback.format_exc())
     finally:
         await close_page_and_browser()
-        print("\n--- Graph Finished ---")
+        print("\n--- Graph Finished (Browser Closed) ---")
 
 if __name__ == "__main__":
     openai_key = os.getenv("OPENAI_API_KEY")
@@ -833,4 +1169,4 @@ async def test_playwright():
             print(f"\nAn error occurred during the Playwright test: {e}")
             if 'browser' in locals() and browser.is_connected():
                 await browser.close()
-                print("Browser closed after error.") 
+                print("Browser closed after error.")
