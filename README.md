@@ -84,8 +84,8 @@ FindSourceURL/                  # 项目根目录
 │   │   └── github.png
 │   │   └── ...
 │   ├── requirements.txt
-│   └── .env                    # (可选)
 │   └── findsourceurl.mp4       # 演示视频在此目录
+│   
 ├── README.md                   # 本文档
 ├── index.html                  # 网站演示前端 HTML
 ├── style.css                   # 网站演示前端 CSS
