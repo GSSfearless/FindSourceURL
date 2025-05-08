@@ -1,4 +1,4 @@
-# FindSourceURL 💡 面向Web交互的AI Agent探索与UI自动化
+# FindSourceURL 💡 面向Web交互的AI Agent与UI自动化
 
 ## 简介 (Executive Summary)
 
