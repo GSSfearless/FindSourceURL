@@ -12,8 +12,7 @@
 
 项目演示视频。
 
-<video controls autoplay muted loop src="https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b" style="max-width: 100%;">
-  您的浏览器不支持 HTML5 视频标签。 您可以 <a href="https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b">点击此处查看视频</a>。
+<video controls autoplay muted loop src="[https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b](https://github.com/user-attachments/assets/f9aa187d-6e9a-417a-8150-1ccd3b61922b)" style="max-width: 100%;">
 </video>
 <br>
 
