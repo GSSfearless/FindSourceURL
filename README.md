@@ -12,9 +12,11 @@
 
 项目演示视频。
 
-<video controls autoplay muted loop src="[https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b](https://github.com/user-attachments/assets/f9aa187d-6e9a-417a-8150-1ccd3b61922b)" style="max-width: 100%;">
-</video>
-<br>
+
+https://github.com/user-attachments/assets/beb6f623-09d4-4940-94f5-cbafe576557e
+
+
+
 
 ## 🎯 项目目标 (Project Goal)
 
