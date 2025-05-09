@@ -24,7 +24,7 @@ CAMERA_ICON_TEMPLATE_PATH = "camera_icon_template.png"
 UPLOAD_BUTTON_TEMPLATE_PATH = "upload_button_template.png" # 新增上传按钮模板路径
 DIALOG_OPEN_BUTTON_TEMPLATE_PATH = "open_button_template.png" # 新增打开按钮模板
 # 将使用 data 目录下的 github.png
-YOUR_IMAGE_TO_UPLOAD_PATH = os.path.join("data", "github.png") 
+YOUR_IMAGE_TO_UPLOAD_PATH = os.path.join("data", "1.png") 
 
 def capture_and_encode_screenshot(filename="screenshot.png", use_manual_file=None, for_ai_analysis=True):
     """
@@ -269,5 +269,4 @@ if __name__ == "__main__":
     print("\n脚本所有自动化步骤演示完毕。")
 
 
-    print("\n脚本执行完毕 (目前仅移动鼠标，未实际点击)。")
-    # print("重要提示：pyautogui 有一个安全特性，快速将鼠标移动到屏幕任一角落可以强制停止脚本运行。") 
+   
