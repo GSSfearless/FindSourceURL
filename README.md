@@ -10,12 +10,14 @@
 
 ## 🎬 演示 (Demo)
 
-项目演示视频，展示了最终 PyAutoGUI 方案的自动化流程。请注意：视频内嵌，音频可能需要手动开启。
+项目演示视频。
 
-<video controls autoplay muted loop src="https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b" style="max-width: 100%;">
-  您的浏览器不支持 HTML5 视频标签。 您可以 <a href="https://github.com/user-attachments/assets/76079e9b-941e-44c6-8978-8977b0863d1b">点击此处查看视频</a>。
-</video>
-<br>
+
+
+https://github.com/user-attachments/assets/ce7b42b3-eae4-4303-8f95-2cf0f4ff38e6
+
+
+
 
 ## 🎯 项目目标 (Project Goal)
 
