@@ -119,7 +119,7 @@ FindSourceURL/                  # 项目根目录
    *   图片放在 `findsourceurl-agent/data/` 目录。
    *   修改 `mouse_vision_agent.py` 中的 `YOUR_IMAGE_TO_UPLOAD_PATH` 指向目标图片。
 
-**5. ⚙️ 配置环境变量:**
+**5. ⚙️ (可选) 配置环境变量:**
 
    *   如需使用API密钥，创建 `.env` 文件于 `findsourceurl-agent/` 并添加 `OPENAI_API_KEY="..."`。
 
