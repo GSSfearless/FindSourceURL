@@ -10,7 +10,7 @@
 
 ## 🎬 演示 (Demo)
 
-项目演示视频，展示了最终 PyAutoGUI 方案的自动化流程。请注意：视频内嵌，音频可能需要手动开启。
+项目演示视频。
 
 
 https://github.com/user-attachments/assets/bb117e2c-6c53-433b-b4a8-3bca09709a7c
